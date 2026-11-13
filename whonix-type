@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+whonix-type: Inject text directly into QEMU/KVM virtual machines via QMP keystrokes.
+Bypasses Wayland/Labwc clipboard isolation and works unconditionally across any guest OS.
+"""
+
+import sys
+import time
+import socket
+import json
+import argparse
+import os
+
+# Complete QEMU QCode translation table for ASCII
+QCODES = {
+    "a": ["a"], "b": ["b"], "c": ["c"], "d": ["d"], "e": ["e"],
+    "f": ["f"], "g": ["g"], "h": ["h"], "i": ["i"], "j": ["j"],
+    "k": ["k"], "l": ["l"], "m": ["m"], "n": ["n"], "o": ["o"],
+    "p": ["p"], "q": ["q"], "r": ["r"], "s": ["s"], "t": ["t"],
+    "u": ["u"], "v": ["v"], "w": ["w"], "x": ["x"], "y": ["y"],
+    "z": ["z"],
+    "0": ["0"], "1": ["1"], "2": ["2"], "3": ["3"], "4": ["4"],
+    "5": ["5"], "6": ["6"], "7": ["7"], "8": ["8"], "9": ["9"],
+    " ": ["spc"], "\n": ["ret"], "\t": ["tab"],
+    "-": ["minus"], "=": ["equal"], "/": ["slash"], ".": ["dot"],
+    ",": ["comma"], ";": ["semicolon"], "\x27": ["apostrophe"],
+    "[": ["bracket_left"], "]": ["bracket_right"], "\\": ["backslash"],
+    "`": ["grave_accent"],
+    # Shifted / Uppercase
+    "A": ["shift", "a"], "B": ["shift", "b"], "C": ["shift", "c"],
+    "D": ["shift", "d"], "E": ["shift", "e"], "F": ["shift", "f"],
+    "G": ["shift", "g"], "H": ["shift", "h"], "I": ["shift", "i"],
+    "J": ["shift", "j"], "K": ["shift", "k"], "L": ["shift", "l"],
+    "M": ["shift", "m"], "N": ["shift", "n"], "O": ["shift", "o"],
+    "P": ["shift", "p"], "Q": ["shift", "q"], "R": ["shift", "r"],
+    "S": ["shift", "s"], "T": ["shift", "t"], "U": ["shift", "u"],
+    "V": ["shift", "v"], "W": ["shift", "w"], "X": ["shift", "x"],
+    "Y": ["shift", "y"], "Z": ["shift", "z"],
+    "!": ["shift", "1"], "@": ["shift", "2"], "#": ["shift", "3"],
+    "$": ["shift", "4"], "%": ["shift", "5"], "^": ["shift", "6"],
+    "&": ["shift", "7"], "*": ["shift", "8"], "(": ["shift", "9"],
+    ")": ["shift", "0"], "_": ["shift", "minus"], "+": ["shift", "equal"],
+    ":": ["shift", "semicolon"], "\"": ["shift", "apostrophe"],
+    "<": ["shift", "comma"], ">": ["shift", "dot"], "?": ["shift", "slash"],
+    "~": ["shift", "grave_accent"], "{": ["shift", "bracket_left"],
+    "}": ["shift", "bracket_right"], "|": ["shift", "backslash"],
+}
+
+def send_text_to_vm(socket_path, text, delay=0.01):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(socket_path)
+    except Exception as e:
+        print(f"Error: Unable to connect to QMP socket '{socket_path}': {e}", file=sys.stderr)
+        return False
+
+    try:
+        # Handshake with QMP
+        s.recv(4096)
+        s.sendall(b'{"execute": "qmp_capabilities"}\n')
+        s.recv(4096)
+
+        for ch in text:
+            if ch in QCODES:
+                key_combo = QCODES[ch]
+                keys = [{"type": "qcode", "data": k} for k in key_combo]
+                payload = json.dumps({"execute": "send-key", "arguments": {"keys": keys}}) + "\n"
+                s.sendall(payload.encode("utf-8"))
+                s.recv(2048)
+                if delay:
+                    time.sleep(delay)
+            else:
+                print(f"Warning: Character '{ch}' (ASCII {ord(ch)}) is not mapped, skipping.", file=sys.stderr)
+    finally:
+        s.close()
+    return True
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Type text directly into a QEMU/KVM or Proxmox VE virtual machine via hardware-level QMP keystrokes."
+    )
+    parser.add_argument(
+        "--vmid", "-v",
+        default=os.environ.get("VMID", "111"),
+        help="Target Proxmox VM ID (default: 111 or $VMID)"
+    )
+    parser.add_argument(
+        "--socket", "-s",
+        help="Custom QMP UNIX domain socket path (overrides --vmid)"
+    )
+    parser.add_argument(
+        "--delay", "-d",
+        type=float,
+        default=0.01,
+        help="Inter-keystroke delay in seconds (default: 0.01)"
+    )
+    parser.add_argument(
+        "text",
+        nargs="?",
+        help="Text string to type into the guest VM. Reads from STDIN if omitted."
+    )
+
+    args = parser.parse_args()
+
+    if args.socket:
+        socket_path = args.socket
+    else:
+        socket_path = f"/var/run/qemu-server/{args.vmid}.qmp"
+
+    if args.text is not None:
+        text = args.text
+    else:
+        text = sys.stdin.read()
+
+    if not text:
+        return
+
+    success = send_text_to_vm(socket_path, text, delay=args.delay)
+    if success:
+        print(f"Successfully typed {len(text)} characters into VM via {socket_path}.")
+
+if __name__ == "__main__":
+    main()
